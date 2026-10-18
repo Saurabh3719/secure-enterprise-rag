@@ -4,6 +4,8 @@ A learning-first, production-minded Retrieval-Augmented Generation (RAG) system 
 
 > **Current status:** Milestone 1 — authentication and default-deny RBAC foundation.
 
+> **Selected retrieval dataset:** IBM `watsonxDocsQA`, pinned locally through a reproducible download script. Project-specific RBAC metadata and sensitive-looking examples will be synthetic.
+
 ## Why this project exists
 
 A basic RAG demo retrieves text and sends it to a language model. An enterprise system must also answer harder questions:
@@ -155,6 +157,7 @@ No major library is considered “used” until it appears in working, tested co
 | Evaluation | Ragas plus custom security tests (planned) | Generic RAG metrics do not prove permission isolation |
 | Local infrastructure | Docker Compose (planned) | Reproducible databases and services with low setup cost |
 | Cluster orchestration | Kubernetes excluded from early milestones | It adds deployment complexity before product behavior is proven |
+| Initial retrieval corpus | IBM `watsonxDocsQA` (downloaded locally) | Apache-2.0 corpus with 1,144 documents and 75 gold QA examples |
 
 ## Included and deliberately excluded
 
@@ -198,7 +201,11 @@ secure-enterprise-rag/
 │       ├── evaluation/          # Quality and security metrics
 │       └── api/                 # HTTP endpoints and dependency wiring
 ├── tests/                       # Unit, integration, security, and evaluation tests
-├── data/                        # Synthetic demo documents only
+├── data/
+│   ├── raw/                     # Local third-party downloads; never committed
+│   ├── synthetic/               # Project-owned role-specific demo documents
+│   └── evaluation/              # Questions and expected retrieval/access outcomes
+├── scripts/                     # Reproducible dataset and maintenance commands
 └── docker-compose.yml           # Local infrastructure (added later)
 ```
 
@@ -295,6 +302,24 @@ When RAG “does not work,” identify the failing layer instead of immediately 
 - Added unit tests for login behavior, salt uniqueness, wrong passwords, cross-role denial, inactive users, and unauthorized-chunk filtering.
 - Added dummy password verification for missing and inactive accounts so invalid-login paths have more similar timing.
 - Replaced an initial `hashlib.scrypt` implementation after tests showed that the local Python/OpenSSL build did not expose `scrypt`. Keeping the failed assumption documented explains why `argon2-cffi` became the first runtime dependency.
+
+### 2026-10-18 — Retrieval dataset selection
+
+- Selected IBM `watsonxDocsQA` as the initial external retrieval corpus because it is small enough to inspect and includes gold document IDs and answers.
+- Pinned the Hugging Face snapshot to commit `f7da4b6d8a8c4609c49fda06af3bea29b6ef9be4`.
+- Added a reproducible downloader and a checksum manifest.
+- Downloaded and verified five snapshot files locally (6,092,305 bytes): 1,144 corpus documents plus 45 training and 30 test questions.
+- Kept third-party raw files local and out of Git; only provenance metadata and project-owned synthetic documents are committed.
+- Deferred EnterpriseRAG-Bench because its 500,000+ documents would add cost and debugging complexity before the small pipeline works.
+
+## Download the retrieval dataset
+
+```bash
+.venv/bin/python -m pip install '.[data]'
+.venv/bin/python scripts/download_watsonx_docs_qa.py
+```
+
+The raw snapshot is stored locally at `data/raw/watsonx_docs_qa/` and is ignored by Git. `data/watsonx_docs_qa_manifest.json` records its pinned revision and file hashes.
 
 ## Run the current tests
 
