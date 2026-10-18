@@ -12,12 +12,6 @@ dependencies = [
     "argon2-cffi>=23.1,<26",
 ]
 
-[project.optional-dependencies]
-data = [
-    "huggingface-hub>=0.23,<1",
-    "urllib3>=1.26,<2; python_version < '3.10'",
-]
-
 [tool.setuptools.packages.find]
 where = ["src"]
 

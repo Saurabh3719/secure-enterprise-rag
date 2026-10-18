@@ -26,7 +26,6 @@ venv/
 
 # Runtime data and model caches
 data/private/
-data/raw/
 storage/
 models/
 
