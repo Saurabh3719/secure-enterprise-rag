@@ -2,7 +2,7 @@
 
 A learning-first, production-minded Retrieval-Augmented Generation (RAG) system for answering questions over internal company documents while enforcing role-based access control (RBAC), evidence-based answers, citations, and security guardrails.
 
-> **Current status:** Milestone 0 — architecture and security requirements. No application code or AI framework has been selected yet.
+> **Current status:** Milestone 1 — authentication and default-deny RBAC foundation.
 
 ## Why this project exists
 
@@ -25,7 +25,7 @@ Before using an LLM, we will create a minimal permission-aware retrieval contrac
 The first milestone will define:
 
 1. Users and identities
-2. Roles and groups
+2. The five initial roles: `intern`, `engineer`, `hr`, `finance`, and `admin`
 3. Document classifications
 4. Access-control metadata attached to every document chunk
 5. Default-deny authorization rules
@@ -35,7 +35,7 @@ The first milestone will define:
 
 ```text
 User:     engineer@example.com
-Role:     engineering
+Role:     engineer
 Question: "What are the executive salary bands?"
 
 Expected retrieval result: zero HR/Finance-restricted chunks
@@ -44,6 +44,26 @@ Expected audit event: authorization denial recorded without exposing document te
 ```
 
 This comes first because an LLM instruction such as “do not reveal confidential information” is not a security boundary. Unauthorized text must be filtered out before it reaches the model.
+
+### Authentication versus authorization
+
+```mermaid
+flowchart LR
+    A[Login ID + password] --> B[Authentication service]
+    B -->|valid credentials| C[User identity: login ID + role]
+    B -->|invalid credentials| D[Generic login failure]
+    C --> E[Authorization policy]
+    F[Chunk ACL: allowed roles] --> E
+    E -->|allow| G[Chunk may enter retrieval results]
+    E -->|deny by default| H[Chunk is removed]
+```
+
+- **Authentication** proves who the user is by checking the login ID and password.
+- **Authorization** checks what the authenticated role is permitted to access.
+- The password is never stored. The implementation stores a unique salted Argon2id hash.
+- The authenticated `UserIdentity` contains only the normalized login ID, role, and active status—not the password hash.
+- Missing, inactive, and wrong-password attempts all perform password verification and return the same result, reducing login-ID enumeration through messages and timing.
+- An empty chunk ACL denies access. `admin` is the only initial role with an explicit global override.
 
 ## System overview
 
@@ -124,7 +144,8 @@ No major library is considered “used” until it appears in working, tested co
 
 | Area | Current decision | Why |
 |---|---|---|
-| Language | Python (planned) | Strong ecosystem for RAG, evaluation, APIs, and data processing |
+| Language | Python 3.9+ (in use) | Strong ecosystem for RAG, evaluation, APIs, and data processing |
+| Password hashing | `argon2-cffi` / Argon2id (in use) | OWASP-preferred memory-hard password hashing with a unique random salt |
 | API | FastAPI (planned) | Typed request models, OpenAPI documentation, and async support |
 | Relational data | PostgreSQL (planned) | Users, roles, document metadata, and audit records need relational integrity |
 | Vector search | Qdrant or PostgreSQL/pgvector (evaluation pending) | Both support metadata filtering needed for RBAC |
@@ -165,7 +186,11 @@ secure-enterprise-rag/
 ├── docs/                        # Deeper concepts, decisions, and troubleshooting
 ├── src/
 │   └── secure_rag/
-│       ├── auth/                # Identity, roles, policy evaluation
+│       ├── auth/
+│       │   ├── models.py        # Roles, stored users, safe identities, chunks
+│       │   ├── passwords.py     # Salted password hashing and verification
+│       │   ├── service.py       # Registration and login orchestration
+│       │   └── policy.py        # Default-deny chunk authorization
 │       ├── ingestion/           # Parsing, cleaning, chunking, metadata
 │       ├── retrieval/           # Vector, keyword, hybrid search, re-ranking
 │       ├── generation/          # Context assembly, prompts, citations
@@ -212,6 +237,28 @@ sequenceDiagram
 
 Each implementation milestone will replace these planned names with links to the actual files, functions, tests, inputs, outputs, and failure behavior.
 
+### Implemented authentication/RBAC call graph
+
+```mermaid
+flowchart TD
+    Register[AuthenticationService.register] --> Normalize[normalize_login_id]
+    Register --> Hash[hash_password]
+    Hash --> Argon[Argon2id + random salt]
+    Register --> Repo[InMemoryUserRepository]
+
+    Login[AuthenticationService.authenticate] --> Repo
+    Login --> Verify[verify_password]
+    Verify --> Compare[hmac.compare_digest]
+    Login --> Identity[UserIdentity]
+
+    Identity --> Access[can_access]
+    Chunk[DocumentChunk.allowed_roles] --> Access
+    Access --> Filter[filter_authorized_chunks]
+    Filter --> Safe[Authorized chunks only]
+```
+
+The in-memory repository is intentionally temporary. PostgreSQL will later replace it without changing the authentication service's responsibility.
+
 ## Failure-oriented learning checklist
 
 When RAG “does not work,” identify the failing layer instead of immediately changing the prompt.
@@ -236,6 +283,28 @@ When RAG “does not work,” identify the failing layer instead of immediately 
 - Selected permission modeling as the first implementation objective.
 - Documented planned technologies without claiming they are already implemented.
 - Deferred Kubernetes, fine-tuning, autonomous agents, and premature framework adoption.
+
+### 2026-10-18 — Authentication and role model
+
+- Added the roles `intern`, `engineer`, `hr`, `finance`, and `admin`.
+- Added login-ID normalization, account registration, and password authentication.
+- Stored salted Argon2id hashes instead of plaintext passwords.
+- Separated stored `UserRecord` data from the safe `UserIdentity` passed to authorization.
+- Added default-deny chunk ACL filtering and an explicit administrator override.
+- Used an in-memory user repository for this isolated milestone; PostgreSQL remains deferred.
+- Added unit tests for login behavior, salt uniqueness, wrong passwords, cross-role denial, inactive users, and unauthorized-chunk filtering.
+- Added dummy password verification for missing and inactive accounts so invalid-login paths have more similar timing.
+- Replaced an initial `hashlib.scrypt` implementation after tests showed that the local Python/OpenSSL build did not expose `scrypt`. Keeping the failed assumption documented explains why `argon2-cffi` became the first runtime dependency.
+
+## Run the current tests
+
+Create a virtual environment, install the package, and run the tests:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+.venv/bin/python -m unittest discover -s tests -v
+```
 
 ## Documentation rule
 
