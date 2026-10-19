@@ -2,7 +2,7 @@
 
 A learning-first, production-minded Retrieval-Augmented Generation (RAG) system for answering questions over internal company documents while enforcing role-based access control (RBAC), evidence-based answers, citations, and security guardrails.
 
-> **Current status:** Milestone 1 — authentication and default-deny RBAC foundation.
+> **Current status:** Milestone 2 — tested Parquet ingestion and dataset inspection.
 
 > **Selected retrieval dataset:** IBM `watsonxDocsQA`, stored directly in this repository. Project-specific RBAC metadata and sensitive-looking examples will be synthetic.
 
@@ -124,6 +124,52 @@ Identity → authorization filter → hybrid search → re-ranking → context b
 
 The authorization filter is applied during retrieval—not after generation—so forbidden chunks never enter the model context.
 
+## Implemented dataset ingestion
+
+The committed Parquet files are now loaded through application code rather than being read directly throughout the project.
+
+```mermaid
+flowchart LR
+    P[Three Parquet files] --> L[WatsonxDocsQALoader]
+    L --> D[1,144 Document objects]
+    L --> T[45 training QuestionAnswer objects]
+    L --> E[30 test QuestionAnswer objects]
+    D --> V[validate_dataset]
+    T --> V
+    E --> V
+    V -->|valid| C[CLI summary and later chunking]
+    V -->|invalid| X[Stop before indexing]
+```
+
+Why this layer exists:
+
+- Parquet column names belong to the external dataset; internal models give the application stable names.
+- Schema validation fails immediately if a required column disappears or an unexpected column appears.
+- Train and test questions remain separate. The test answers must not influence retrieval development.
+- Broken source references are detected before they become confusing retrieval failures.
+- Later code will receive `Document` and `QuestionAnswer` objects without needing to understand Parquet.
+
+### Inspect the dataset
+
+```bash
+.venv/bin/python -m secure_rag.cli.inspect_dataset
+```
+
+Show one sample from each section:
+
+```bash
+.venv/bin/python -m secure_rag.cli.inspect_dataset --samples 1
+```
+
+The command reports record counts, duplicate IDs, empty fields, broken document references, validation status, and readable samples. Held-out test answers and expected document IDs are hidden by default to reduce evaluation leakage. A nonzero exit status indicates invalid data, allowing the same command to be used in automated checks.
+
+Run it from the repository root so the default `data/watsonx_docs_qa/` path is available. A different checkout or mounted dataset can be selected explicitly:
+
+```bash
+.venv/bin/python -m secure_rag.cli.inspect_dataset \
+  --dataset-directory /path/to/watsonx_docs_qa
+```
+
 ## Planned layers
 
 | Milestone | Layer | Learning outcome | Deliverable |
@@ -148,6 +194,7 @@ No major library is considered “used” until it appears in working, tested co
 |---|---|---|
 | Language | Python 3.9+ (in use) | Strong ecosystem for RAG, evaluation, APIs, and data processing |
 | Password hashing | `argon2-cffi` / Argon2id (in use) | OWASP-preferred memory-hard password hashing with a unique random salt |
+| Parquet ingestion | `pyarrow` (in use) | Reads the committed columnar dataset while preserving its schema and data types |
 | API | FastAPI (planned) | Typed request models, OpenAPI documentation, and async support |
 | Relational data | PostgreSQL (planned) | Users, roles, document metadata, and audit records need relational integrity |
 | Vector search | Qdrant or PostgreSQL/pgvector (evaluation pending) | Both support metadata filtering needed for RBAC |
@@ -181,7 +228,7 @@ No major library is considered “used” until it appears in working, tested co
 
 Exclusion does not always mean permanent rejection. It means the technology does not yet solve a demonstrated requirement.
 
-## Planned repository structure
+## Repository structure
 
 ```text
 secure-enterprise-rag/
@@ -194,7 +241,12 @@ secure-enterprise-rag/
 │       │   ├── passwords.py     # Salted password hashing and verification
 │       │   ├── service.py       # Registration and login orchestration
 │       │   └── policy.py        # Default-deny chunk authorization
-│       ├── ingestion/           # Parsing, cleaning, chunking, metadata
+│       ├── ingestion/
+│       │   ├── models.py        # Stable Document, QuestionAnswer, and bundle models
+│       │   ├── loader.py        # Parquet paths, schema checks, and row conversion
+│       │   └── validator.py     # Counts, uniqueness, required fields, and references
+│       ├── cli/
+│       │   └── inspect_dataset.py # Human-readable dataset inspection command
 │       ├── retrieval/           # Vector, keyword, hybrid search, re-ranking
 │       ├── generation/          # Context assembly, prompts, citations
 │       ├── guardrails/          # Injection, leakage, and output checks
@@ -243,6 +295,26 @@ sequenceDiagram
 
 Each implementation milestone will replace these planned names with links to the actual files, functions, tests, inputs, outputs, and failure behavior.
 
+### Implemented ingestion call graph
+
+```mermaid
+flowchart TD
+    CLI[inspect_dataset.main] --> Loader[WatsonxDocsQALoader.load]
+    Loader --> Docs[load_documents]
+    Loader --> Train[load_training_questions]
+    Loader --> Test[load_test_questions]
+    Docs --> Read[_read_rows]
+    Train --> Read
+    Test --> Read
+    Read --> Arrow[pyarrow.parquet.read_table]
+    Loader --> Bundle[DatasetBundle]
+    Bundle --> Validate[validate_dataset]
+    Validate --> Report[DatasetValidationReport]
+    Report --> Output[Summary, samples, and exit status]
+```
+
+`loader.py` is the only component that knows the external column names such as `doc_id`, `md_document`, and `correct_answer_document_ids`. This prevents those names from leaking throughout future retrieval code.
+
 ### Implemented authentication/RBAC call graph
 
 ```mermaid
@@ -280,6 +352,18 @@ When RAG “does not work,” identify the failing layer instead of immediately 
 | Answer invents unsupported facts | Grounding/guardrails | No abstention rule or citation validation |
 | Good answer is slow or expensive | Operations | Excessive candidates, oversized chunks, repeated embeddings |
 
+### Ingestion-specific failures
+
+| Failure | Detection | Likely response |
+|---|---|---|
+| Parquet file missing | `DatasetLoadError` identifies the path | Restore the committed file |
+| Parquet file corrupted | PyArrow read failure wrapped as `DatasetLoadError` | Verify or replace the file |
+| Dataset schema changed | Loader reports missing and unexpected columns | Update the adapter deliberately |
+| Duplicate IDs | Validation fails before indexing | Remove or reconcile duplicates |
+| Empty document or answer | Validation reports empty required fields | Repair or exclude the record |
+| QA source ID not in corpus | Broken-reference count becomes nonzero | Correct the label or restore its document |
+| Same question in train and test | Split-overlap validation fails | Restore evaluation isolation |
+
 ## Build journal
 
 ### 2026-10-18 — Repository initialization
@@ -309,6 +393,17 @@ When RAG “does not work,” identify the failing layer instead of immediately 
 - Downloaded and verified five snapshot files locally (6,092,305 bytes): 1,144 corpus documents plus 45 training and 30 test questions.
 - Committed the complete Apache-2.0 dataset snapshot directly to the repository so no download script is required.
 - Deferred EnterpriseRAG-Bench because its 500,000+ documents would add cost and debugging complexity before the small pipeline works.
+
+### 2026-10-20 — Dataset ingestion and inspection
+
+- Added `pyarrow` as the Parquet ingestion dependency; Pandas was not needed for this typed loading layer.
+- Added immutable `Document`, `QuestionAnswer`, and `DatasetBundle` models.
+- Added `WatsonxDocsQALoader` with explicit file locations and exact schema validation.
+- Preserved the 45-question training split and 30-question test split separately.
+- Added integrity validation for expected counts, duplicate IDs, empty required fields, missing source documents, and train/test overlap.
+- Added `python -m secure_rag.cli.inspect_dataset` for readable summaries and samples.
+- Confirmed 1,144 unique documents, 75 unique questions, zero empty required records, and zero broken source references.
+- Added nine ingestion and inspection tests; the complete suite now contains 22 passing tests.
 
 ## Retrieval dataset
 
